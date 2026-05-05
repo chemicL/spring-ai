@@ -238,9 +238,7 @@ public class StreamableMcpAnnotations2IT {
 						assertThat(mcpClient.listResources()).isNotNull();
 						assertThat(mcpClient.listResources().resources()).hasSize(1);
 						assertThat(mcpClient.listResources().resources().get(0))
-							.isEqualToComparingFieldByFieldRecursively(Resource.builder()
-								.uri("file://resource")
-								.name("Test Resource")
+							.isEqualToComparingFieldByFieldRecursively(Resource.builder("file://resource", "Test Resource")
 								.mimeType("text/plain")
 								.description("Test resource description")
 								.build());

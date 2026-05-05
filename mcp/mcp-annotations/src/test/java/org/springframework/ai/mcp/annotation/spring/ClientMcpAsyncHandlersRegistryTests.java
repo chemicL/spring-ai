@@ -304,8 +304,8 @@ class ClientMcpAsyncHandlersRegistryTests {
 		var handlers = beanFactory.getBean(HandlersConfiguration.class);
 
 		List<McpSchema.Resource> updatedResources = List.of(
-				McpSchema.Resource.builder().name("resource-1").uri("file:///resource/1").build(),
-				McpSchema.Resource.builder().name("resource-2").uri("file:///resource/2").build());
+				McpSchema.Resource.builder("file:///resource/1", "resource-1").build(),
+				McpSchema.Resource.builder("file:///resource/2", "resource-2").build());
 
 		registry.handleResourceListChanged("client-1", updatedResources).block();
 		assertThat(handlers.getCalls()).hasSize(2)
