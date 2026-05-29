@@ -33,7 +33,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.junit.jupiter.MockitoExtension;
 import reactor.core.publisher.Flux;
-import reactor.core.publisher.Hooks;
 
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.observation.AdvisorObservationContext;
@@ -93,16 +92,11 @@ class ToolCallAdvisorObservationHierarchyTests {
 	@BeforeEach
 	void setUp() {
 		this.observationRegistry.observationConfig().observationHandler(this.hierarchyHandler);
-		// Propagate the reactor context's observation onto thread-locals when the
-		// ToolCallAdvisor switches to bounded-elastic to execute the tool. This is what
-		// gives the tool-call observation its parent.
-		Hooks.enableAutomaticContextPropagation();
 		lenient().when(this.chatModel.getDefaultOptions()).thenReturn(DefaultToolCallingChatOptions.builder().build());
 	}
 
 	@AfterEach
 	void tearDown() {
-		Hooks.disableAutomaticContextPropagation();
 	}
 
 	@Test
