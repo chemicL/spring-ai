@@ -121,7 +121,7 @@ class OpenAiObservationOtelIT {
 		return type;
 	}
 
-	private static String expectedSpanName(Observation.Context ctx, boolean isOtel) {
+	private static String expectedSpanName(Observation.Context ctx) {
 		if (ctx instanceof ChatClientObservationContext) {
 			return "spring_ai chat_client";
 		}
@@ -129,7 +129,7 @@ class OpenAiObservationOtelIT {
 			return advisorCtx.getAdvisorName();
 		}
 		if (ctx instanceof ChatModelObservationContext chatModelCtx) {
-			return isOtel ? "chat " + chatModelCtx.getRequest().getOptions().getModel() : "chat.model";
+			return "chat " + chatModelCtx.getRequest().getOptions().getModel();
 		}
 		return ctx.getName();
 	}
@@ -222,8 +222,8 @@ class OpenAiObservationOtelIT {
 		assertThat(spans).as("Number of spans should match number of observations").hasSize(capture.nodes.size());
 
 		List<String> obsTreeLinks = capture.nodes.stream().map(n -> {
-			String parentName = n.parentCtx() != null ? expectedSpanName(n.parentCtx(), true) : "root";
-			return parentName + " -> " + expectedSpanName(n.ctx(), true);
+			String parentName = n.parentCtx() != null ? expectedSpanName(n.parentCtx()) : "root";
+			return parentName + " -> " + expectedSpanName(n.ctx());
 		}).sorted().toList();
 
 		Map<String, SpanData> spansById = spans.stream().collect(Collectors.toMap(s -> s.getSpanId(), s -> s));

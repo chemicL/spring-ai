@@ -943,11 +943,7 @@ public class DefaultChatClient implements ChatClient {
 			Assert.notNull(toolContext, "toolContext cannot be null");
 
 			this.chatModel = chatModel;
-			this.toolCallAdvisorBuilder = Objects.requireNonNullElse(toolCallAdvisorBuilder,
-					ToolCallAdvisor.builder()
-						.toolCallingManager(org.springframework.ai.model.tool.ToolCallingManager.builder()
-							.observationRegistry(observationRegistry)
-							.build()));
+			this.toolCallAdvisorBuilder = Objects.requireNonNullElse(toolCallAdvisorBuilder, ToolCallAdvisor.builder());
 			this.optionsCustomizer = customizer != null ? customizer.clone() : null;
 
 			this.userText = userText;

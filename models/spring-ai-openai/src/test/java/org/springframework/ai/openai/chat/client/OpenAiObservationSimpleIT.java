@@ -118,7 +118,7 @@ class OpenAiObservationSimpleIT {
 		return type;
 	}
 
-	private static String expectedSpanName(Observation.Context ctx, boolean isOtel) {
+	private static String expectedSpanName(Observation.Context ctx) {
 		if (ctx instanceof ChatClientObservationContext) {
 			return "spring_ai chat_client";
 		}
@@ -126,7 +126,7 @@ class OpenAiObservationSimpleIT {
 			return advisorCtx.getAdvisorName();
 		}
 		if (ctx instanceof ChatModelObservationContext chatModelCtx) {
-			return isOtel ? "chat " + chatModelCtx.getRequest().getOptions().getModel() : "chat.model";
+			return "chat " + chatModelCtx.getRequest().getOptions().getModel();
 		}
 		return ctx.getName();
 	}
@@ -196,11 +196,19 @@ class OpenAiObservationSimpleIT {
 		assertThat(chatModelNodes).as("Expected at least 1 LLM calls").hasSizeGreaterThanOrEqualTo(1);
 
 		Deque<SimpleSpan> spans = simpleTracer.getSpans();
+
+		logger.info("--- Simple Spans ---");
+		for (SimpleSpan span : spans) {
+			logger.info("Span: {} - context: {} - parent: {}", span.getName(), span.context().spanId(),
+					span.context().parentId());
+		}
+		logger.info("------------------");
+
 		assertThat(spans).as("Number of spans should match number of observations").hasSize(capture.nodes.size());
 
 		List<String> obsTreeLinks = capture.nodes.stream().map(n -> {
-			String parentName = n.parentCtx() != null ? expectedSpanName(n.parentCtx(), false) : "root";
-			return parentName + " -> " + expectedSpanName(n.ctx(), false);
+			String parentName = n.parentCtx() != null ? expectedSpanName(n.parentCtx()) : "root";
+			return parentName + " -> " + expectedSpanName(n.ctx());
 		}).sorted().toList();
 
 		Map<String, SimpleSpan> spansById = spans.stream().collect(Collectors.toMap(s -> s.context().spanId(), s -> s));
@@ -210,7 +218,7 @@ class OpenAiObservationSimpleIT {
 			String parentId = s.context().parentId();
 			if (parentId != null && !parentId.isEmpty() && !parentId.equals("0000000000000000")) {
 				SimpleSpan parentSpan = spansById.get(parentId);
-				parentName = parentSpan != null ? parentSpan.getName() : "root";
+				parentName = parentSpan != null ? parentSpan.getName() : "unknown";
 			}
 			return parentName + " -> " + s.getName();
 		}).sorted().toList();
