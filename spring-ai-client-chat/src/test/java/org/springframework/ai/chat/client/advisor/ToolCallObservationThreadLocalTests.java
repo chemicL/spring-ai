@@ -22,7 +22,12 @@ import java.util.concurrent.atomic.AtomicReference;
 import io.micrometer.observation.Observation;
 import io.micrometer.observation.contextpropagation.ObservationThreadLocalAccessor;
 import io.micrometer.observation.tck.TestObservationRegistry;
+import io.micrometer.tracing.handler.DefaultTracingObservationHandler;
+import io.micrometer.tracing.test.simple.SimpleSpan;
+import io.micrometer.tracing.test.simple.SimpleTracer;
 import org.junit.jupiter.api.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Flux;
 import reactor.core.scheduler.Schedulers;
 
@@ -40,10 +45,17 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 public class ToolCallObservationThreadLocalTests {
 
+	private static final Logger logger = LoggerFactory.getLogger(ToolCallObservationThreadLocalTests.class);
+
 	private TestObservationRegistry observationRegistry = TestObservationRegistry.create();
+
+	private SimpleTracer simpleTracer = new SimpleTracer();
 
 	@Test
 	public void testSyncToolWithMockModel() {
+		this.observationRegistry.observationConfig()
+			.observationHandler(new DefaultTracingObservationHandler(this.simpleTracer));
+
 		AtomicReference<Observation> threadLocalObservation = new AtomicReference<>();
 
 		ToolCallback syncTool = FunctionToolCallback.<CityInput, String>builder("getWeather", in -> {
@@ -106,6 +118,13 @@ public class ToolCallObservationThreadLocalTests {
 
 		assertThat(threadLocalObservation.get()).isNotNull();
 		assertThat(threadLocalObservation.get().getContextView().getName()).isEqualTo("spring.ai.tool");
+
+		logger.info("--- Spans ---");
+		for (SimpleSpan span : this.simpleTracer.getSpans()) {
+			logger.info("Span: {} - context: {} - parent: {}", span.getName(), span.context().spanId(),
+					span.context().parentId());
+		}
+		logger.info("-------------");
 	}
 
 	public record CityInput(String city) {

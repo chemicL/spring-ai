@@ -16,6 +16,7 @@
 
 package org.springframework.ai.chat.client.advisor;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -25,13 +26,19 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationHandler;
 import io.micrometer.observation.ObservationView;
+import io.micrometer.observation.contextpropagation.ObservationThreadLocalAccessor;
 import io.micrometer.observation.tck.TestObservationRegistry;
+import io.micrometer.tracing.handler.DefaultTracingObservationHandler;
+import io.micrometer.tracing.test.simple.SimpleSpan;
+import io.micrometer.tracing.test.simple.SimpleTracer;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Flux;
 
 import org.springframework.ai.chat.client.ChatClient;
@@ -77,11 +84,15 @@ import static org.mockito.Mockito.when;
 @ExtendWith(MockitoExtension.class)
 class ToolCallAdvisorObservationHierarchyTests {
 
+	private static final Logger logger = LoggerFactory.getLogger(ToolCallAdvisorObservationHierarchyTests.class);
+
 	private final ChatModel chatModel = mock(ChatModel.class);
 
 	private final TestObservationRegistry observationRegistry = TestObservationRegistry.create();
 
 	private final HierarchyCapturingHandler hierarchyHandler = new HierarchyCapturingHandler();
+
+	private final SimpleTracer simpleTracer = new SimpleTracer();
 
 	private final ToolCallback weatherTool = FunctionToolCallback
 		.builder("getWeather", (CityInput in) -> in.city() + ": 25C")
@@ -91,7 +102,9 @@ class ToolCallAdvisorObservationHierarchyTests {
 
 	@BeforeEach
 	void setUp() {
-		this.observationRegistry.observationConfig().observationHandler(this.hierarchyHandler);
+		this.observationRegistry.observationConfig()
+			.observationHandler(new DefaultTracingObservationHandler(this.simpleTracer))
+			.observationHandler(this.hierarchyHandler);
 		lenient().when(this.chatModel.getDefaultOptions()).thenReturn(DefaultToolCallingChatOptions.builder().build());
 	}
 
@@ -100,19 +113,63 @@ class ToolCallAdvisorObservationHierarchyTests {
 	}
 
 	@Test
+	void streamingToolCallProducesExpectedObservationHierarchyWithContextPropagation() {
+		io.micrometer.context.ContextRegistry.getInstance()
+			.registerThreadLocalAccessor(new ObservationThreadLocalAccessor());
+		reactor.core.publisher.Hooks.enableAutomaticContextPropagation();
+
+		// Simulate Spring Boot putting an observation in ThreadLocal (e.g. HTTP Server
+		// observation)
+		Observation fakeServerObs = Observation.createNotStarted("fake.server", this.observationRegistry).start();
+		try (Observation.Scope scope = fakeServerObs.openScope()) {
+			// run logic directly
+			when(this.chatModel.stream(any(Prompt.class)))
+				.thenReturn(Flux.just(toolCallChatResponse(), emptyChatResponse()).delayElements(Duration.ofMillis(10)))
+				.thenReturn(Flux.just(finalChatResponseChunk1(), finalChatResponseChunk2())
+					.delayElements(Duration.ofMillis(10)));
+
+			ToolCallingManager toolCallingManager = ToolCallingManager.builder()
+				.observationRegistry(this.observationRegistry)
+				.build();
+
+			String content = ChatClient
+				.builder(this.chatModel, this.observationRegistry, null, null,
+						ToolCallAdvisor.builder().toolCallingManager(toolCallingManager))
+				.build()
+				.prompt()
+				.user("weather in Paris?")
+				.tools(t -> t.callbacks(this.weatherTool))
+				.stream()
+				.content()
+				.collectList()
+				.block()
+				.stream()
+				.reduce("", String::concat);
+		}
+		finally {
+			reactor.core.publisher.Hooks.disableAutomaticContextPropagation();
+			io.micrometer.context.ContextRegistry.getInstance()
+				.removeThreadLocalAccessor(ObservationThreadLocalAccessor.KEY);
+
+			logger.info("--- Spans ---");
+			for (SimpleSpan span : this.simpleTracer.getSpans()) {
+				logger.info("Span: {} - context: {} - parent: {}", span.getName(), span.context().spanId(),
+						span.context().parentId());
+			}
+			logger.info("-------------");
+		}
+	}
+
+	@Test
 	void streamingToolCallProducesExpectedObservationHierarchy() {
-		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(toolCallChatResponse()))
-			.thenReturn(Flux.just(finalChatResponse()));
+		when(this.chatModel.stream(any(Prompt.class)))
+			.thenReturn(Flux.just(toolCallChatResponse(), emptyChatResponse()).delayElements(Duration.ofMillis(10)))
+			.thenReturn(Flux.just(finalChatResponseChunk1(), finalChatResponseChunk2())
+				.delayElements(Duration.ofMillis(10)));
 
-		// Use a ToolCallingManager wired to the same registry so the tool-execution
-		// observation is recorded alongside the chat-client/advisor observations.
-		ToolCallingManager toolCallingManager = ToolCallingManager.builder()
-			.observationRegistry(this.observationRegistry)
-			.build();
-
-		String content = ChatClient
-			.builder(this.chatModel, this.observationRegistry, null, null,
-					ToolCallAdvisor.builder().toolCallingManager(toolCallingManager))
+		// Use default ChatClient builder to see if the hierarchy is broken without the
+		// explicit fix
+		String content = ChatClient.builder(this.chatModel, this.observationRegistry, null, null)
 			.build()
 			.prompt()
 			.user("weather in Paris?")
@@ -181,6 +238,18 @@ class ToolCallAdvisorObservationHierarchyTests {
 				"{\"city\":\"Paris\"}");
 		AssistantMessage msg = AssistantMessage.builder().content("").toolCalls(List.of(toolCall)).build();
 		return chatResponse(msg);
+	}
+
+	private static ChatResponse emptyChatResponse() {
+		return chatResponse(new AssistantMessage(""));
+	}
+
+	private static ChatResponse finalChatResponseChunk1() {
+		return chatResponse(new AssistantMessage("Paris"));
+	}
+
+	private static ChatResponse finalChatResponseChunk2() {
+		return chatResponse(new AssistantMessage(": 25C"));
 	}
 
 	private static ChatResponse finalChatResponse() {
