@@ -29,7 +29,6 @@ import io.micrometer.observation.ObservationView;
 import io.micrometer.observation.contextpropagation.ObservationThreadLocalAccessor;
 import io.micrometer.observation.tck.TestObservationRegistry;
 import io.micrometer.tracing.handler.DefaultTracingObservationHandler;
-import io.micrometer.tracing.test.simple.SimpleSpan;
 import io.micrometer.tracing.test.simple.SimpleTracer;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
@@ -145,18 +144,66 @@ class ToolCallAdvisorObservationHierarchyTests {
 				.block()
 				.stream()
 				.reduce("", String::concat);
+
+			// Sanity: the model was hit exactly twice (tool-call response + final
+			// response)
+			// and the tool produced the expected output that is propagated to the user.
+			verify(this.chatModel, times(2)).stream(any(Prompt.class));
+			assertThat(content).isEqualTo("Paris: 25C");
+
+			// All six expected observations were started (5 + fakeServerObs).
+			List<Node> nodes = this.hierarchyHandler.nodes();
+			assertThat(nodes).hasSize(6);
+
+			// Exactly one root: the fakeServerObs call observation.
+			List<Node> roots = this.hierarchyHandler.roots();
+			assertThat(roots).singleElement().satisfies(root -> assertThat(root.name()).isEqualTo("fake.server"));
+
+			// The fakeServerObs observation has a single child: the ChatClient
+			// observation.
+			Node server = roots.get(0);
+			List<Node> serverChildren = this.hierarchyHandler.childrenOf(server);
+			assertThat(serverChildren).singleElement().satisfies(chatClient -> {
+				assertThat(chatClient.context()).isInstanceOf(ChatClientObservationContext.class);
+				assertThat(chatClient.name()).isEqualTo("spring.ai.chat.client");
+			});
+
+			Node chatClient = serverChildren.get(0);
+			List<Node> chatClientChildren = this.hierarchyHandler.childrenOf(chatClient);
+			assertThat(chatClientChildren).singleElement()
+				.satisfies(
+						advisor -> assertThat(advisor.context()).isInstanceOfSatisfying(AdvisorObservationContext.class,
+								ctx -> assertThat(ctx.getAdvisorName()).isEqualTo("Tool Calling Advisor")));
+
+			// The ToolCallAdvisor observation hosts the iteration: two streaming "stream"
+			// advisor calls with a tool-call observation sandwiched between them. They
+			// are
+			// all siblings, confirming the recursion happens at the same level inside the
+			// advisor (not nested deeper on every iteration).
+			Node toolAdvisor = chatClientChildren.get(0);
+			List<Node> toolAdvisorChildren = this.hierarchyHandler.childrenOf(toolAdvisor);
+			assertThat(toolAdvisorChildren).hasSize(3);
+
+			assertThat(toolAdvisorChildren.get(0).context()).isInstanceOfSatisfying(AdvisorObservationContext.class,
+					ctx -> assertThat(ctx.getAdvisorName()).isEqualTo("stream"));
+
+			assertThat(toolAdvisorChildren.get(1).context()).isInstanceOfSatisfying(ToolCallingObservationContext.class,
+					ctx -> assertThat(ctx.getToolDefinition().name()).isEqualTo("getWeather"));
+
+			assertThat(toolAdvisorChildren.get(2).context()).isInstanceOfSatisfying(AdvisorObservationContext.class,
+					ctx -> assertThat(ctx.getAdvisorName()).isEqualTo("stream"));
+
+			// And just to make the tree assertion explicit, the two streaming advisor
+			// branches are leaves: the model is mocked, so there are no nested chat-model
+			// observations under them.
+			assertThat(this.hierarchyHandler.childrenOf(toolAdvisorChildren.get(0))).isEmpty();
+			assertThat(this.hierarchyHandler.childrenOf(toolAdvisorChildren.get(1))).isEmpty();
+			assertThat(this.hierarchyHandler.childrenOf(toolAdvisorChildren.get(2))).isEmpty();
 		}
 		finally {
 			reactor.core.publisher.Hooks.disableAutomaticContextPropagation();
 			io.micrometer.context.ContextRegistry.getInstance()
 				.removeThreadLocalAccessor(ObservationThreadLocalAccessor.KEY);
-
-			logger.info("--- Spans ---");
-			for (SimpleSpan span : this.simpleTracer.getSpans()) {
-				logger.info("Span: {} - context: {} - parent: {}", span.getName(), span.context().spanId(),
-						span.context().parentId());
-			}
-			logger.info("-------------");
 		}
 	}
 
@@ -167,9 +214,13 @@ class ToolCallAdvisorObservationHierarchyTests {
 			.thenReturn(Flux.just(finalChatResponseChunk1(), finalChatResponseChunk2())
 				.delayElements(Duration.ofMillis(10)));
 
-		// Use default ChatClient builder to see if the hierarchy is broken without the
-		// explicit fix
-		String content = ChatClient.builder(this.chatModel, this.observationRegistry, null, null)
+		ToolCallingManager toolCallingManager = ToolCallingManager.builder()
+			.observationRegistry(this.observationRegistry)
+			.build();
+
+		String content = ChatClient
+			.builder(this.chatModel, this.observationRegistry, null, null,
+					ToolCallAdvisor.builder().toolCallingManager(toolCallingManager))
 			.build()
 			.prompt()
 			.user("weather in Paris?")
@@ -190,43 +241,43 @@ class ToolCallAdvisorObservationHierarchyTests {
 		List<Node> nodes = this.hierarchyHandler.nodes();
 		assertThat(nodes).hasSize(5);
 
-		// Exactly one root: the ChatClient call observation.
+		// Without context propagation, the tool execution happens in a different thread
+		// and loses its parent observation, resulting in two roots.
 		List<Node> roots = this.hierarchyHandler.roots();
-		assertThat(roots).singleElement().satisfies(root -> {
-			assertThat(root.context()).isInstanceOf(ChatClientObservationContext.class);
-			assertThat(root.name()).isEqualTo("spring.ai.chat.client");
-		});
+		assertThat(roots).hasSize(2);
+
+		Node chatClient = roots.stream()
+			.filter(r -> r.name().equals("spring.ai.chat.client"))
+			.findFirst()
+			.orElseThrow();
+		Node toolExecution = roots.stream().filter(r -> r.name().equals("spring.ai.tool")).findFirst().orElseThrow();
+
+		assertThat(chatClient.context()).isInstanceOf(ChatClientObservationContext.class);
+		assertThat(toolExecution.context()).isInstanceOf(ToolCallingObservationContext.class);
 
 		// The ChatClient observation has a single child: the ToolCallAdvisor observation.
-		Node chatClient = roots.get(0);
 		List<Node> chatClientChildren = this.hierarchyHandler.childrenOf(chatClient);
 		assertThat(chatClientChildren).singleElement()
 			.satisfies(advisor -> assertThat(advisor.context()).isInstanceOfSatisfying(AdvisorObservationContext.class,
 					ctx -> assertThat(ctx.getAdvisorName()).isEqualTo("Tool Calling Advisor")));
 
 		// The ToolCallAdvisor observation hosts the iteration: two streaming "stream"
-		// advisor calls with a tool-call observation sandwiched between them. They are
-		// all siblings, confirming the recursion happens at the same level inside the
-		// advisor (not nested deeper on every iteration).
+		// advisor calls. The tool-call observation is missing from here because it became
+		// a root.
 		Node toolAdvisor = chatClientChildren.get(0);
 		List<Node> toolAdvisorChildren = this.hierarchyHandler.childrenOf(toolAdvisor);
-		assertThat(toolAdvisorChildren).hasSize(3);
+		assertThat(toolAdvisorChildren).hasSize(2);
 
 		assertThat(toolAdvisorChildren.get(0).context()).isInstanceOfSatisfying(AdvisorObservationContext.class,
 				ctx -> assertThat(ctx.getAdvisorName()).isEqualTo("stream"));
 
-		assertThat(toolAdvisorChildren.get(1).context()).isInstanceOfSatisfying(ToolCallingObservationContext.class,
-				ctx -> assertThat(ctx.getToolDefinition().name()).isEqualTo("getWeather"));
-
-		assertThat(toolAdvisorChildren.get(2).context()).isInstanceOfSatisfying(AdvisorObservationContext.class,
+		assertThat(toolAdvisorChildren.get(1).context()).isInstanceOfSatisfying(AdvisorObservationContext.class,
 				ctx -> assertThat(ctx.getAdvisorName()).isEqualTo("stream"));
 
-		// And just to make the tree assertion explicit, the two streaming advisor
-		// branches are leaves: the model is mocked, so there are no nested chat-model
-		// observations under them.
+		// The streaming advisor branches and the detached tool execution are leaves.
 		assertThat(this.hierarchyHandler.childrenOf(toolAdvisorChildren.get(0))).isEmpty();
 		assertThat(this.hierarchyHandler.childrenOf(toolAdvisorChildren.get(1))).isEmpty();
-		assertThat(this.hierarchyHandler.childrenOf(toolAdvisorChildren.get(2))).isEmpty();
+		assertThat(this.hierarchyHandler.childrenOf(toolExecution)).isEmpty();
 	}
 
 	// -------------------------------------------------------------------------
