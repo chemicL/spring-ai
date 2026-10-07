@@ -16,6 +16,11 @@
 
 	<url>https://github.com/spring-projects/spring-ai</url>
 
+	<properties>
+		<!-- The modern (2026-07-28) server API is only available in the SDK snapshot -->
+		<mcp.sdk.version>2.1.0-SNAPSHOT</mcp.sdk.version>
+	</properties>
+
 	<dependencies>
 
 		<dependency>
